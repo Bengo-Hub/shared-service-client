@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	httpware "github.com/Bengo-Hub/httpware"
 	"github.com/cenkalti/backoff/v4"
 	"github.com/sony/gobreaker"
 	"go.opentelemetry.io/otel"
@@ -194,7 +195,19 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	// Set custom headers
+	// Propagate tenant context headers for service-to-service calls
+	if tid := httpware.GetTenantID(ctx); tid != "" {
+		req.Header.Set(httpware.HeaderTenantID, tid)
+	}
+	if tslug := httpware.GetTenantSlug(ctx); tslug != "" {
+		req.Header.Set(httpware.HeaderTenantSlug, tslug)
+	}
+	// Propagate request ID for distributed tracing
+	if rid := httpware.GetRequestID(ctx); rid != "" {
+		req.Header.Set(httpware.HeaderRequestID, rid)
+	}
+
+	// Set custom headers (can override propagated values)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
