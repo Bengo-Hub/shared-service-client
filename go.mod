@@ -2,10 +2,8 @@ module github.com/Bengo-Hub/shared-service-client
 
 go 1.24.0
 
-replace github.com/Bengo-Hub/httpware => ../httpware
-
 require (
-	github.com/Bengo-Hub/httpware v0.1.1
+	github.com/Bengo-Hub/httpware v0.2.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/sony/gobreaker v1.0.0
 	go.opentelemetry.io/otel v1.32.0
