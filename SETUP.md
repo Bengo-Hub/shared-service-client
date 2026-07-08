@@ -56,17 +56,17 @@ go mod tidy
 
 1. Clone all repositories into a parent directory:
 ```bash
-mkdir -p BengoBox
-cd BengoBox/
+mkdir -p Codevertex
+cd Codevertex/
 
 git clone https://github.com/Bengo-Hub/shared-service-client.git shared/service-client
 git clone https://github.com/Bengo-Hub/subscription-service.git subscription-service
 # ... clone other services
 ```
 
-2. Create `go.work` at BengoBox root:
+2. Create `go.work` at Codevertex root:
 ```bash
-cd BengoBox/
+cd Codevertex/
 go work init \
   ./subscription-service \
   ./logistics-service \

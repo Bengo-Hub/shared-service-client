@@ -95,7 +95,7 @@ RUN go build -o /app/api ./cmd/api
 For local development, use Go workspaces:
 
 1. Clone all repositories into a parent directory
-2. Create `go.work` at the BengoBox root
+2. Create `go.work` at the Codevertex root
 3. All modules see each other automatically
 
 See `SETUP.md` for detailed instructions.

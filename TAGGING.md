@@ -2,7 +2,7 @@
 
 ## Repository Structure
 
-**Important:** `shared-service-client` is an **independent GitHub repository** (`github.com/Bengo-Hub/shared-service-client`) in the Bengo-Hub organization. Each BengoBox service is also an independent repository. The `BengoBox` folder is just a local root directory where developers clone repositories - it is **not** a monorepo.
+**Important:** `shared-service-client` is an **independent GitHub repository** (`github.com/Bengo-Hub/shared-service-client`) in the Bengo-Hub organization. Each Codevertex service is also an independent repository. The `Codevertex` folder is just a local root directory where developers clone repositories - it is **not** a monorepo.
 
 ## Tagging the Library
 
@@ -27,7 +27,7 @@ require (
 )
 ```
 
-**Note:** For local development, developers can use `go.work` at the `BengoBox` root to link all cloned repositories together.
+**Note:** For local development, developers can use `go.work` at the `Codevertex` root to link all cloned repositories together.
 
 ### Step 3: Verify
 
@@ -43,8 +43,8 @@ When developing locally, clone all repositories into a parent directory:
 
 ```bash
 # Create parent directory
-mkdir -p BengoBox
-cd BengoBox/
+mkdir -p Codevertex
+cd Codevertex/
 
 # Clone all repositories
 git clone https://github.com/Bengo-Hub/subscription-service.git subscription-service
@@ -52,8 +52,8 @@ git clone https://github.com/Bengo-Hub/logistics-service.git logistics-service
 git clone https://github.com/Bengo-Hub/shared-service-client.git shared/service-client
 # ... clone other services
 
-# Create go.work at BengoBox root
-cd BengoBox/
+# Create go.work at Codevertex root
+cd Codevertex/
 go work init \
   ./subscription-service \
   ./logistics-service \

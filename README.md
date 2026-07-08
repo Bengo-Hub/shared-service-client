@@ -1,6 +1,6 @@
 # Shared Service Client
 
-Standardized HTTP client library for service-to-service communication across BengoBox microservices.
+Standardized HTTP client library for service-to-service communication across Codevertex microservices.
 
 **Repository:** `github.com/Bengo-Hub/shared-service-client`
 
@@ -23,10 +23,10 @@ go mod tidy
 
 ### Local Development (Go Workspace)
 
-When developing locally, clone all repositories into a parent directory (e.g., `BengoBox/`) and use `go.work`:
+When developing locally, clone all repositories into a parent directory (e.g., `Codevertex/`) and use `go.work`:
 
 ```bash
-cd BengoBox/
+cd Codevertex/
 go work init \
   ./subscription-service \
   ./logistics-service \
