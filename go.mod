@@ -3,7 +3,7 @@ module github.com/Bengo-Hub/shared-service-client
 go 1.26.0
 
 require (
-	github.com/Bengo-Hub/httpware v0.4.1
+	github.com/Bengo-Hub/httpware v0.16.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/sony/gobreaker v1.0.0
 	go.opentelemetry.io/otel v1.32.0

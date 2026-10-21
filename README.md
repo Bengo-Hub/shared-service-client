@@ -114,6 +114,14 @@ Automatic retries with exponential backoff:
 - Retries on network errors and HTTP 5xx/429 status codes
 - Uses exponential backoff (100ms → 5s max)
 - Maximum retry time: 30 seconds
+- Only calls that are safe to repeat are retried: GET, HEAD, PUT, DELETE and OPTIONS, plus any
+  call that carries an `Idempotency-Key` (or `X-Idempotency-Key`) header. A POST or PATCH without
+  one is sent once, so a retry can never charge, create or send twice.
+- Every attempt resends the full request body, and every call gets its own backoff, so concurrent
+  calls on one client do not share retry state.
+- A cancelled or expired caller context ends the call at once.
+- Response bodies are read up to 64 MiB; a larger body fails the call.
+- Debug logs mask `Authorization`, `X-API-Key` and cookie headers.
 
 ## Distributed Tracing
 

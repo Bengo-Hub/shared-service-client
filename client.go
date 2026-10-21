@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -25,10 +27,41 @@ type Client struct {
 	baseURL        string
 	httpClient     *http.Client
 	circuitBreaker *gobreaker.CircuitBreaker
-	retryBackoff   backoff.BackOff
+	retry          retrySettings
 	tracer         trace.Tracer
 	logger         *zap.Logger
 	serviceName    string
+}
+
+// maxResponseBytes caps how much of a response body is read into memory.
+const maxResponseBytes = 64 << 20
+
+// retrySettings are the exponential backoff parameters. Each call builds its own backoff from them,
+// because a backoff carries per-call state and is not safe to share between goroutines.
+type retrySettings struct {
+	initial, max, elapsed time.Duration
+	multiplier, jitter    float64
+}
+
+func (r retrySettings) newBackOff() backoff.BackOff {
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = r.initial
+	b.MaxInterval = r.max
+	b.MaxElapsedTime = r.elapsed
+	b.Multiplier = r.multiplier
+	b.RandomizationFactor = r.jitter
+	b.Reset()
+	return b
+}
+
+// statusError marks a response worth retrying (5xx or 429).
+type statusError struct {
+	status int
+	body   string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("retryable status %d: %s", e.status, e.body)
 }
 
 // Config configures a service client.
@@ -109,19 +142,19 @@ func New(cfg *Config) *Client {
 		},
 	})
 
-	// Configure retry backoff
-	retryBackoff := backoff.NewExponentialBackOff()
-	retryBackoff.InitialInterval = cfg.InitialInterval
-	retryBackoff.MaxInterval = cfg.MaxInterval
-	retryBackoff.MaxElapsedTime = cfg.MaxElapsedTime
-	retryBackoff.Multiplier = cfg.Multiplier
-	retryBackoff.RandomizationFactor = cfg.RandomizationFactor
+	retry := retrySettings{
+		initial:    cfg.InitialInterval,
+		max:        cfg.MaxInterval,
+		elapsed:    cfg.MaxElapsedTime,
+		multiplier: cfg.Multiplier,
+		jitter:     cfg.RandomizationFactor,
+	}
 
 	return &Client{
 		baseURL:        cfg.BaseURL,
 		httpClient:     httpClient,
 		circuitBreaker: cb,
-		retryBackoff:   retryBackoff,
+		retry:          retry,
 		tracer:         tracer,
 		logger:         cfg.Logger.Named("service-client").With(zap.String("service", cfg.ServiceName)),
 		serviceName:    cfg.ServiceName,
@@ -170,98 +203,64 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		))
 	defer span.End()
 
-	// Prepare request body
-	var bodyReader io.Reader
+	// Marshal once; every attempt gets its own reader over the same bytes.
+	var bodyBytes []byte
 	if body != nil {
-		bodyBytes, err := json.Marshal(body)
+		var err error
+		bodyBytes, err = json.Marshal(body)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			return nil, fmt.Errorf("marshal request body: %w", err)
 		}
-		bodyReader = bytes.NewReader(bodyBytes)
 	}
 
-	// Create HTTP request
 	url := c.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return nil, fmt.Errorf("create request: %w", err)
-	}
+	canRetry := isIdempotent(method, headers)
 
-	// Set default headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	// Propagate tenant context headers for service-to-service calls
-	if tid := httpware.GetTenantID(ctx); tid != "" {
-		req.Header.Set(httpware.HeaderTenantID, tid)
-	}
-	if tslug := httpware.GetTenantSlug(ctx); tslug != "" {
-		req.Header.Set(httpware.HeaderTenantSlug, tslug)
-	}
-	// Propagate request ID for distributed tracing
-	if rid := httpware.GetRequestID(ctx); rid != "" {
-		req.Header.Set(httpware.HeaderRequestID, rid)
-	}
-
-	// Set custom headers (can override propagated values)
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	// Log request
-	c.logger.Debug("service request",
-		zap.String("method", method),
-		zap.String("url", url),
-		zap.Any("headers", req.Header),
-	)
-
-	// Execute with circuit breaker and retry
 	var resp *Response
-	err = backoff.Retry(func() error {
-		// Execute through circuit breaker
+	err := backoff.Retry(func() error {
+		req, err := c.newRequest(ctx, method, url, bodyBytes, headers)
+		if err != nil {
+			return backoff.Permanent(fmt.Errorf("create request: %w", err))
+		}
+		c.logger.Debug("service request",
+			zap.String("method", method),
+			zap.String("url", url),
+			zap.Any("headers", redactHeaders(req.Header)),
+		)
+
 		result, err := c.circuitBreaker.Execute(func() (interface{}, error) {
 			httpResp, err := c.httpClient.Do(req)
 			if err != nil {
 				span.RecordError(err)
 				return nil, err
 			}
+			defer httpResp.Body.Close()
 
-			// Read response body
-			respBody, readErr := io.ReadAll(httpResp.Body)
-			httpResp.Body.Close()
+			respBody, readErr := io.ReadAll(io.LimitReader(httpResp.Body, maxResponseBytes+1))
 			if readErr != nil {
 				return nil, fmt.Errorf("read response: %w", readErr)
 			}
-
-			// Check if we should retry based on status code
-			if httpResp.StatusCode >= 500 || httpResp.StatusCode == 429 {
-				return nil, fmt.Errorf("retryable status %d: %s", httpResp.StatusCode, string(respBody))
+			if len(respBody) > maxResponseBytes {
+				return nil, errResponseTooLarge
 			}
 
-			resp = &Response{
-				StatusCode: httpResp.StatusCode,
-				Headers:    httpResp.Header,
-				Body:       respBody,
+			if httpResp.StatusCode >= 500 || httpResp.StatusCode == http.StatusTooManyRequests {
+				return nil, &statusError{status: httpResp.StatusCode, body: truncate(string(respBody), 512)}
 			}
-
-			return resp, nil
+			return &Response{StatusCode: httpResp.StatusCode, Headers: httpResp.Header, Body: respBody}, nil
 		})
-
 		if err != nil {
-			// Check if error is retryable
-			if !isRetryableError(err) {
+			// A cancelled or expired caller context ends the call; only failures of this attempt retry.
+			if ctx.Err() != nil || !canRetry || !isRetryableError(err) {
 				return backoff.Permanent(err)
 			}
 			return err
 		}
-
 		resp = result.(*Response)
 		return nil
-	}, backoff.WithContext(c.retryBackoff, ctx))
+	}, backoff.WithContext(c.retry.newBackOff(), ctx))
 
 	if err != nil {
 		span.RecordError(err)
@@ -274,7 +273,6 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 
-	// Log response
 	c.logger.Debug("service response",
 		zap.String("method", method),
 		zap.String("url", url),
@@ -291,22 +289,89 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	return resp, nil
 }
 
-// isRetryableError determines if an error should be retried.
+// newRequest builds one attempt's request: default headers, propagated tenant and request ID,
+// then the caller's headers (which win).
+func (c *Client) newRequest(ctx context.Context, method, url string, body []byte, headers map[string]string) (*http.Request, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, reader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if tid := httpware.GetTenantID(ctx); tid != "" {
+		req.Header.Set(httpware.HeaderTenantID, tid)
+	}
+	if tslug := httpware.GetTenantSlug(ctx); tslug != "" {
+		req.Header.Set(httpware.HeaderTenantSlug, tslug)
+	}
+	if rid := httpware.GetRequestID(ctx); rid != "" {
+		req.Header.Set(httpware.HeaderRequestID, rid)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	return req, nil
+}
+
+var errResponseTooLarge = errors.New("response body exceeds the client limit")
+
+// isIdempotent reports whether a failed call may be sent again. POST and PATCH are only retried
+// when the caller supplied an idempotency key, so a retry can never charge, create or send twice.
+func isIdempotent(method string, headers map[string]string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete, http.MethodOptions:
+		return true
+	}
+	for k := range headers {
+		switch http.CanonicalHeaderKey(k) {
+		case "Idempotency-Key", "X-Idempotency-Key":
+			return true
+		}
+	}
+	return false
+}
+
+// isRetryableError reports whether one attempt's failure is transient: a 5xx or 429 answer, or a
+// network error (refused, reset, timeout, truncated body). Circuit-breaker rejections and
+// oversized responses are final.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-
-	// Network errors are retryable
-	if err.Error() == "context deadline exceeded" ||
-		err.Error() == "context canceled" ||
-		err.Error() == "connection refused" ||
-		err.Error() == "connection reset" {
+	var se *statusError
+	if errors.As(err, &se) {
 		return true
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, errResponseTooLarge) {
+		return false
+	}
+	var ne net.Error
+	return errors.As(err, &ne) || errors.Is(err, io.ErrUnexpectedEOF)
+}
 
-	// HTTP 5xx and 429 are retryable (handled in doRequest)
-	return false
+// redactHeaders copies headers for logging with credentials masked.
+func redactHeaders(h http.Header) http.Header {
+	out := make(http.Header, len(h))
+	for k, v := range h {
+		switch http.CanonicalHeaderKey(k) {
+		case "Authorization", "X-Api-Key", "Cookie", "Set-Cookie", "Proxy-Authorization":
+			out[k] = []string{"[redacted]"}
+		default:
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // DecodeJSON unmarshals the response body into the provided value.
