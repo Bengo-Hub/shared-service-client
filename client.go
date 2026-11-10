@@ -64,6 +64,16 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("retryable status %d: %s", e.status, e.body)
 }
 
+// StatusCode reports the HTTP status behind a failed call that ended on a retryable answer
+// (5xx or 429) once retries ran out. ok is false for any other error.
+func StatusCode(err error) (status int, ok bool) {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.status, true
+	}
+	return 0, false
+}
+
 // Config configures a service client.
 type Config struct {
 	BaseURL     string
@@ -219,6 +229,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	canRetry := isIdempotent(method, headers)
 
 	var resp *Response
+	var lastStatus *statusError // last 5xx or 429 answer seen by this call
 	err := backoff.Retry(func() error {
 		req, err := c.newRequest(ctx, method, url, bodyBytes, headers)
 		if err != nil {
@@ -252,6 +263,10 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 			return &Response{StatusCode: httpResp.StatusCode, Headers: httpResp.Header, Body: respBody}, nil
 		})
 		if err != nil {
+			var se *statusError
+			if errors.As(err, &se) {
+				lastStatus = se
+			}
 			// A cancelled or expired caller context ends the call; only failures of this attempt retry.
 			if ctx.Err() != nil || !canRetry || !isRetryableError(err) {
 				return backoff.Permanent(err)
@@ -261,6 +276,13 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		resp = result.(*Response)
 		return nil
 	}, backoff.WithContext(c.retry.newBackOff(), ctx))
+
+	// If this call's own failures tripped the breaker, report the real answer the server gave
+	// rather than the breaker rejection that followed it.
+	if err != nil && lastStatus != nil &&
+		(errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests)) {
+		err = lastStatus
+	}
 
 	if err != nil {
 		span.RecordError(err)

@@ -130,6 +130,25 @@ All requests automatically create OpenTelemetry spans:
 - Attributes: `http.method`, `http.url`, `service.name`, `http.status_code`
 - Errors are recorded in spans
 
+## CRM client (`crm` package)
+
+`github.com/Bengo-Hub/shared-service-client/crm` is the one client every Go service uses to talk
+to the MarketFlow CRM, which owns customer identity. A service stores only the contact id.
+
+```go
+crmc := crm.New(cfg.CRMURL, cfg.CRMServiceKey, logger) // empty URL or key disables it
+
+c, err := crmc.UpsertStrict(ctx, crm.UpsertInput{TenantID: t, Phone: "0712345678", FirstName: "Amina"})
+id := crmc.Upsert(ctx, in)                  // best effort, uuid.Nil on any failure
+byID, err := crmc.BatchGet(ctx, t, ids)     // chunks of 200
+```
+
+- Calls: `UpsertStrict`, `Upsert`, `Get`, `BatchGet`, `Update`, `Delete`, `ByPhone`, `Search`, `SplitName`.
+- Phones are normalised to E.164 (default region KE) before every write and lookup.
+- Errors: `ErrDisabled`, `ErrNoIdentifier`, `ErrNotFound`, and `*crm.Error{Status, Code, Message}`
+  (Status 0 means the CRM was unreachable).
+- Timeout is 5s per call. Reads retry through the client above; writes are sent once.
+
 ## Integration
 
 Replace direct `http.Client` usage with `serviceclient.Client`:
