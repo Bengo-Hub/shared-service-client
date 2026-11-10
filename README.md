@@ -144,10 +144,17 @@ byID, err := crmc.BatchGet(ctx, t, ids)     // chunks of 200
 ```
 
 - Calls: `UpsertStrict`, `Upsert`, `Get`, `BatchGet`, `Update`, `Delete`, `ByPhone`, `Search`, `SplitName`.
+- `Contact` carries `ID`, `FirstName`, `LastName`, `Email` and `Phone`. `UpdateInput` fields are
+  pointers, and a nil field is left unchanged. `Search` limits to 1..100 and defaults to 20.
 - Phones are normalised to E.164 (default region KE) before every write and lookup.
-- Errors: `ErrDisabled`, `ErrNoIdentifier`, `ErrNotFound`, and `*crm.Error{Status, Code, Message}`
-  (Status 0 means the CRM was unreachable).
-- Timeout is 5s per call. Reads retry through the client above; writes are sent once.
+- Errors: `ErrDisabled`, `ErrNoTenant`, `ErrNoIdentifier`, `ErrNotFound`, and
+  `*crm.Error{Status, Code, Message}`. Status 0 means no answer: the CRM was unreachable, or the
+  circuit breaker rejected the call (Code is then `crm.CodeCircuitOpen`).
+- Callers treat a 400 or 422 as a refusal to show the user, and every other failure (401, 403,
+  429, 5xx, Status 0) as an outage: save the record unlinked and link it later.
+- Timeout is 5s per call. Reads (`Get`, `ByPhone`, `Search`) retry through the client above with a
+  circuit breaker; writes (`UpsertStrict`, `Update`, `Delete`, `BatchGet`) are sent once.
+- An empty URL or key disables the client, and every method is safe on a nil `*Client`.
 
 ## Integration
 
